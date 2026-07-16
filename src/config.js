@@ -159,6 +159,14 @@ export const CHAIN = {
   // Prazo após o qual o solicitante pode reaver o escrow de uma tarefa de IA
   // não atendida (AI_REFUND), evitando fundos presos.
   AI_TASK_TIMEOUT_MS: 60 * 60_000,
+  // IA que aprende + se auto-corrige (Fase 1). A PARTIR de AI_ACCOUNTABILITY_HEIGHT,
+  // cada oráculo acumula reputação on-chain (completed/failed → score) e é
+  // ECONOMICAMENTE responsabilizado: se a tarefa que ele foi designado expira sem
+  // entrega e é reembolsada, ele perde reputação e é slashado em AI_ORACLE_SLASH,
+  // que vai como COMPENSAÇÃO ao solicitante. Fork-gated (grandfather do histórico);
+  // no gênese-ativo (testnet) nasce ligado.
+  AI_ACCOUNTABILITY_HEIGHT: 1_760_000,
+  AI_ORACLE_SLASH: 10n * UNIT, // penalidade por não-entrega (paga ao solicitante)
 
   // Limites anti-DoS (mempool, rede, RPC, respostas).
   MAX_MEMPOOL: 5_000,
@@ -305,6 +313,7 @@ export const FORK_HEIGHTS = [
   'STRICT_PRODUCER_HEIGHT', 'CANONICAL_HASH_HEIGHT', 'STATEROOT_HEIGHT', 'BRIDGE_QUORUM_HEIGHT',
   'BRIDGE_PROOF_HEIGHT', 'VOTING_HEIGHT', 'PERMISSIONS_HEIGHT', 'RESOURCE_HEIGHT', 'GOVERNANCE_HEIGHT',
   'VESTING_HEIGHT', 'META_HEIGHT', 'TOKEN_ADMIN_HEIGHT', 'NFT_HEIGHT', 'NAME_HEIGHT',
+  'AI_ACCOUNTABILITY_HEIGHT',
 ];
 // SLASHING_HEIGHT é DELIBERADAMENTE excluído do gênese-ativo: a detecção de assinatura
 // dupla ainda não distingue equivocação maliciosa de um validador honesto re-produzindo

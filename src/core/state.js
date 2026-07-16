@@ -1391,6 +1391,11 @@ export class State {
           bridgeTransfers: 0,
           registeredAt: tx.timestamp,
           endpoint: null,
+          // IA que aprende (Fase 1): reputação on-chain acumulada dos resultados.
+          completed: 0,
+          failed: 0,
+          slashed: 0n,
+          reputation: 50, // 0..100, começa neutro e evolui com o desempenho
         });
         oracle.stake += amount;
         if (typeof tx.data.endpoint === 'string') oracle.endpoint = tx.data.endpoint;
@@ -1415,6 +1420,9 @@ export class State {
         task.completedAt = tx.timestamp;
         task.prompt = null; task.params = null; // poda a ENTRADA (fica no tx AI_TASK) — limita o crescimento de estado
         oracle.tasksCompleted += 1;
+        // IA aprende: entrega bem-sucedida sobe a reputação do oráculo.
+        oracle.completed = (oracle.completed ?? 0) + 1;
+        oracle.reputation = Math.min(100, (oracle.reputation ?? 50) + 4);
         acc.balance += task.reward;
         break;
       }
@@ -1431,6 +1439,23 @@ export class State {
         task.completedAt = tx.timestamp;
         task.prompt = null; task.params = null; // poda a ENTRADA (limita o crescimento de estado)
         acc.balance += task.reward;
+        // IA se auto-corrige (Fase 1, fork-gated): o oráculo DESIGNADO que deixou a
+        // tarefa expirar sem entrega é responsabilizado — perde reputação e é slashado
+        // em AI_ORACLE_SLASH, que vai como COMPENSAÇÃO ao solicitante (além do refund).
+        // Conserva supply: o slash sai do STAKE travado do oráculo.
+        if (height >= CHAIN.AI_ACCOUNTABILITY_HEIGHT) {
+          const orc = this.oracles[task.assignedOracle];
+          if (orc) {
+            orc.failed = (orc.failed ?? 0) + 1;
+            orc.reputation = Math.max(0, (orc.reputation ?? 50) - 12);
+            const slash = (orc.stake ?? 0n) < CHAIN.AI_ORACLE_SLASH ? (orc.stake ?? 0n) : CHAIN.AI_ORACLE_SLASH;
+            if (slash > 0n) {
+              orc.stake -= slash;
+              orc.slashed = (orc.slashed ?? 0n) + slash;
+              acc.balance += slash; // compensação ao solicitante
+            }
+          }
+        }
         break;
       }
 
