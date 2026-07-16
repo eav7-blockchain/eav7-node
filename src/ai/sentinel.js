@@ -105,8 +105,15 @@ export class SecuritySentinel {
     const status = await this.#getJson('/status');
 
     if (status.height < this.lastHeight) {
-      await this.alert('CHAIN_ROLLBACK', 'critical',
-        `altura da cadeia regrediu de ${this.lastHeight} para ${status.height}`, {});
+      // Queda além de qualquer reorg plausível (> 50k blocos) = troca de gênese /
+      // relaunch da rede, não um rollback real. Re-baseline em silêncio em vez de
+      // alertar para sempre (senão a sentinela cospe CHAIN_ROLLBACK a cada tick).
+      if (this.lastHeight - status.height > 50_000) {
+        this.lastHeight = status.height;
+      } else {
+        await this.alert('CHAIN_ROLLBACK', 'critical',
+          `altura da cadeia regrediu de ${this.lastHeight} para ${status.height}`, {});
+      }
     }
     if (status.mempool > 1000) {
       await this.alert('MEMPOOL_FLOOD', 'warning', `mempool com ${status.mempool} transações pendentes`, {});
