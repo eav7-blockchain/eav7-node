@@ -1370,6 +1370,21 @@ export class State {
           };
           break;
         }
+        // Fase 4: modo ABERTO (leilão) — orçamento escrowado; oráculos dão lances
+        // (AI_BID) e o solicitante adjudica ao melhor (AI_AWARD). Sem oráculo designado.
+        if (height >= CHAIN.AI_MARKET_HEIGHT && tx.data.open === true) {
+          if (acc.balance < amount + fee) throw new Error('saldo insuficiente para o orçamento da tarefa');
+          acc.balance -= amount + fee;
+          this.aiTasks[tx.id] = {
+            id: tx.id, requester: tx.from, mode: 'OPEN',
+            model: typeof model === 'string' ? model : null, prompt, params: tx.data.params ?? null,
+            budget: amount, reward: amount, status: 'BIDDING', createdAt: blockTs,
+            bidDeadline: blockTs + CHAIN.AI_BID_WINDOW_MS,
+            expiresAt: blockTs + CHAIN.AI_TASK_TIMEOUT_MS,
+            bids: {}, assignedOracle: null, oracle: null, resultHash: null, output: null, completedAt: null,
+          };
+          break;
+        }
         // Oráculo designado obrigatório: o solicitante escolhe em quem confia; só
         // esse oráculo pode resgatar a recompensa. Impede que qualquer oráculo
         // registrado saque o escrow com um output lixo.
@@ -1547,6 +1562,47 @@ export class State {
         break;
       }
 
+      // Fase 4 — BID: oráculo dá um lance (preço) numa tarefa aberta.
+      case 'AI_BID': {
+        if (height < CHAIN.AI_MARKET_HEIGHT) throw new Error('marketplace de IA ainda não ativo');
+        if (!this.oracles[tx.from]) throw new Error('só oráculo registrado pode dar lance');
+        const task = this.aiTasks[tx.data.taskId];
+        if (!task || task.mode !== 'OPEN') throw new Error('tarefa aberta inexistente');
+        if (task.status !== 'BIDDING') throw new Error('lances encerrados');
+        if (blockTs >= task.bidDeadline) throw new Error('janela de lances expirada');
+        let price;
+        try { price = BigInt(tx.data.price); } catch { throw new Error('preço do lance inválido'); }
+        if (price <= 0n || price > task.budget) throw new Error('preço do lance inválido (0 < preço <= orçamento)');
+        if (acc.balance < fee) throw new Error('saldo insuficiente para a taxa');
+        acc.balance -= fee;
+        task.bids[tx.from] = { price, at: blockTs };
+        break;
+      }
+
+      // Fase 4 — AWARD: o solicitante adjudica a tarefa ao melhor lance (preço × reputação,
+      // escolha off-chain). O excedente do orçamento é devolvido; o preço fica em escrow
+      // para o oráculo, que passa a entregar via AI_RESULT (→ janela de desafio da Fase 3).
+      case 'AI_AWARD': {
+        if (height < CHAIN.AI_MARKET_HEIGHT) throw new Error('marketplace de IA ainda não ativo');
+        const task = this.aiTasks[tx.data.taskId];
+        if (!task || task.mode !== 'OPEN') throw new Error('tarefa aberta inexistente');
+        if (task.requester !== tx.from) throw new Error('só o solicitante adjudica');
+        if (task.status !== 'BIDDING') throw new Error('tarefa não está em lances');
+        if (blockTs >= task.expiresAt) throw new Error('tarefa expirada');
+        const winner = tx.data.oracle;
+        const bid = task.bids[winner];
+        if (!bid) throw new Error('oráculo escolhido não deu lance');
+        if (acc.balance < fee) throw new Error('saldo insuficiente para a taxa');
+        acc.balance -= fee;
+        const refund = task.budget - bid.price; // excedente do orçamento
+        if (refund > 0n) acc.balance += refund;
+        task.assignedOracle = winner;
+        task.reward = bid.price;
+        task.status = 'PENDING'; // vira tarefa de oráculo único (entrega + janela de desafio)
+        task.bids = {}; // poda
+        break;
+      }
+
       // Fase 2 — COMMIT: oráculo trava o hash(output|salt) antes de ver as respostas
       // dos outros. Impede copie-e-cole entre oráculos.
       case 'AI_COMMIT': {
@@ -1618,7 +1674,8 @@ export class State {
         const task = this.aiTasks[tx.data.taskId];
         if (!task) throw new Error('tarefa de IA inexistente');
         if (task.requester !== tx.from) throw new Error('apenas o solicitante pode reembolsar');
-        if (task.status !== 'PENDING') throw new Error('tarefa de IA não está pendente');
+        // PENDING (oráculo não entregou) ou BIDDING (tarefa aberta sem adjudicação).
+        if (task.status !== 'PENDING' && task.status !== 'BIDDING') throw new Error('tarefa de IA não é reembolsável');
         if (blockTs < task.expiresAt) throw new Error('a tarefa ainda não expirou'); // H-2: usa timestamp do bloco
         task.status = 'REFUNDED';
         task.completedAt = tx.timestamp;

@@ -188,6 +188,13 @@ export const CHAIN = {
   AI_VERDICT_WINDOW_MS: 30 * 60_000, // janela para o júri votar
   AI_CHALLENGE_BOND: 20n * UNIT, // fiança do desafiante (perde se o resultado for mantido)
   AI_VERDICT_QUORUM: 3, // nº de oráculos-jurados p/ decidir a disputa
+  // Marketplace/leilão de oráculos (Fase 4). A PARTIR de AI_MARKET_HEIGHT, uma AI_TASK
+  // pode ser ABERTA (data.open) com um ORÇAMENTO: oráculos dão lances (AI_BID, preço),
+  // o solicitante adjudica ao melhor (AI_AWARD, por preço × reputação) e o excedente do
+  // orçamento é devolvido. O ganhador entrega e passa pela janela de desafio (Fase 3).
+  // Fork-gated; no gênese-ativo (testnet) nasce ligado.
+  AI_MARKET_HEIGHT: 1_820_000,
+  AI_BID_WINDOW_MS: 30 * 60_000, // janela para lances numa tarefa aberta
 
   // Limites anti-DoS (mempool, rede, RPC, respostas).
   MAX_MEMPOOL: 5_000,
@@ -231,7 +238,7 @@ export const CHAIN = {
       NFT_CREATE: 10, NFT_MINT: 3, NFT_TRANSFER: 2, NFT_APPROVE: 1, NFT_BURN: 2,
       NAME_REGISTER: 3, NAME_UPDATE: 1, NAME_TRANSFER: 1, NAME_RELEASE: 1,
       AI_TASK: 5, AI_RESULT: 0, AI_REFUND: 0, ORACLE_REGISTER: 2, AI_COMMIT: 1, AI_REVEAL: 1,
-      AI_CLAIM: 1, AI_CHALLENGE: 2, AI_VERDICT: 1,
+      AI_CLAIM: 1, AI_CHALLENGE: 2, AI_VERDICT: 1, AI_BID: 1, AI_AWARD: 1,
       BRIDGE_OUT: 2, BRIDGE_IN: 0, BRIDGE_SETTLE: 0,
       EAVM_DEPLOY: 10, EAVM_CALL: 5, // custo BASE; a execução da VM soma gás/energia dinâmico
     },
@@ -322,6 +329,8 @@ export const CHAIN = {
     AI_CLAIM: 10_000n,
     AI_CHALLENGE: 20_000n,
     AI_VERDICT: 10_000n,
+    AI_BID: 10_000n,
+    AI_AWARD: 10_000n,
     ORACLE_REGISTER: 10_000n,
     BRIDGE_OUT: 20_000n,
     BRIDGE_IN: 0n,
@@ -340,7 +349,7 @@ export const FORK_HEIGHTS = [
   'STRICT_PRODUCER_HEIGHT', 'CANONICAL_HASH_HEIGHT', 'STATEROOT_HEIGHT', 'BRIDGE_QUORUM_HEIGHT',
   'BRIDGE_PROOF_HEIGHT', 'VOTING_HEIGHT', 'PERMISSIONS_HEIGHT', 'RESOURCE_HEIGHT', 'GOVERNANCE_HEIGHT',
   'VESTING_HEIGHT', 'META_HEIGHT', 'TOKEN_ADMIN_HEIGHT', 'NFT_HEIGHT', 'NAME_HEIGHT',
-  'AI_ACCOUNTABILITY_HEIGHT', 'AI_QUORUM_HEIGHT', 'AI_CHALLENGE_HEIGHT',
+  'AI_ACCOUNTABILITY_HEIGHT', 'AI_QUORUM_HEIGHT', 'AI_CHALLENGE_HEIGHT', 'AI_MARKET_HEIGHT',
 ];
 // SLASHING_HEIGHT é DELIBERADAMENTE excluído do gênese-ativo: a detecção de assinatura
 // dupla ainda não distingue equivocação maliciosa de um validador honesto re-produzindo
