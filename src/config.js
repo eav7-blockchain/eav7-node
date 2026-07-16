@@ -12,8 +12,11 @@
 const UNIT = 1_000_000n;
 
 export const CHAIN = {
-  NAME: 'EAV7',
-  PROTOCOL: 'eav20',
+  // NAME/PROTOCOL/EAVM_CHAIN_ID são sobrescrevíveis por env para rodar redes
+  // separadas (ex.: testnet) a partir do MESMO código, sem tocar a mainnet.
+  // Mainnet não define essas envs → mantém os valores padrão.
+  NAME: process.env.EAV7_NETWORK_NAME || 'EAV7',
+  PROTOCOL: process.env.EAV7_PROTOCOL || 'eav20',
   PROTOCOL_VERSION: 1,
   HASH_PREFIX: 'E7',
   SYMBOL: 'EAV7',
@@ -172,7 +175,7 @@ export const CHAIN = {
   // EAVM — protocolo de contas externas próprio da EAV7 (MetaMask / Trust
   // Wallet via "rede customizada"). Essas carteiras exibem a moeda nativa com
   // 18 decimais; EAV7 usa 6 — 1 EAV7 = 10^18 unidades EAVM = 10^6 e7.
-  EAVM_CHAIN_ID: 72020,
+  EAVM_CHAIN_ID: Number(process.env.EAV7_EAVM_CHAIN_ID) || 72020,
   EAVM_WEI_PER_E7: 10n ** 12n,
 
   // ---- Modelo de recurso "Energia" (estilo Tron) ----

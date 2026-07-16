@@ -19,12 +19,55 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 let statsCache = { height: -1, value: null };
 let searchIndexCache = { height: -1, sorted: null };
 
+const NATIVE_VOLUME_TYPES = new Set(['TRANSFER', 'EAVM_TRANSFER']);
+const STATS_BUCKETS = 24; // séries horárias (24h)
+const STATS_SCAN_CAP = 5_000; // teto de blocos-com-tx varridos por recálculo (anti-DoS)
+
 function computeStats(blockchain, state) {
   if (statsCache.value && statsCache.height === blockchain.height) return statsCache.value;
   const accs = Object.keys(state.accounts);
   let staked = 0n;
   for (const a of accs) staked += (state.accounts[a].staked ?? 0n);
-  const value = { accounts: accs.length, staked, transactions: blockchain.txIndex.size };
+
+  // Janela de 24h: volume nativo transferido, contagem de txs e séries horárias REAIS
+  // (para os sparklines). Usa o índice ESPARSO de blocos-com-tx (não varre a cadeia
+  // inteira) + teto anti-DoS; tudo cacheado por altura.
+  const now = blockchain.head?.timestamp ?? 0;
+  const dayMs = 86_400_000;
+  const from = now - dayMs;
+  const bucketMs = dayMs / STATS_BUCKETS;
+  const txSeries = new Array(STATS_BUCKETS).fill(0);
+  const volSeries = new Array(STATS_BUCKETS).fill(0);
+  let volume24h = 0n;
+  let txCount24h = 0;
+  const bwt = blockchain.blocksWithTxs ?? [];
+  let scanned = 0;
+  for (let i = bwt.length - 1; i >= 0 && scanned < STATS_SCAN_CAP; i--) {
+    const b = blockchain.getBlock(bwt[i]);
+    if (!b) continue;
+    scanned++;
+    if (b.timestamp < from) break; // saímos da janela de 24h
+    const bucket = Math.min(STATS_BUCKETS - 1, Math.max(0, Math.floor((b.timestamp - from) / bucketMs)));
+    for (const t of (b.transactions ?? [])) {
+      txCount24h++;
+      txSeries[bucket]++;
+      if (NATIVE_VOLUME_TYPES.has(t.type)) {
+        const amt = BigInt(t.amount ?? '0');
+        volume24h += amt;
+        volSeries[bucket] += Number(amt / CHAIN.UNIT);
+      }
+    }
+  }
+
+  const value = {
+    accounts: accs.length,
+    staked,
+    transactions: blockchain.txIndex.size,
+    volume24h,
+    txCount24h,
+    txSeries,
+    volSeries,
+  };
   statsCache = { height: blockchain.height, value };
   return value;
 }
@@ -96,7 +139,9 @@ function isFrontendRoute(parts) {
 // do app são encaminhados ao Next. A API (accept: application/json), o P2P (sem
 // accept text/html) e o RPC seguem sendo servidos pelo próprio nó.
 const WEB_HOST = '127.0.0.1';
-const WEB_PORT = 3000;
+// Porta do frontend Next para o reverse-proxy. Sobrescrevível por env para
+// rodar uma segunda instância (ex.: testnet em 3001) no mesmo servidor.
+const WEB_PORT = Number(process.env.EAV7_WEB_PORT) || 3000;
 // Prefixos de diretório do app (proxy por startsWith — inclui /_next/image, sem extensão).
 const WEB_PREFIXES = ['/_next/', '/bg/', '/brand/'];
 const WEB_FILES_RE = /^\/(?:favicon\.ico|icon\.svg|icon\.png|apple-icon|opengraph-image|twitter-image|robots\.txt|sitemap\.xml|manifest|sw\.js)/i;
@@ -534,13 +579,15 @@ async function handle(node, req, res) {
     const s = computeStats(blockchain, state);
     send(res, 200, {
       accounts: s.accounts,
-      accountsDelta: 0,
+      accountsDelta: 0, // sem histórico de estado → não há delta real (front oculta)
       transactions: s.transactions,
-      transactionsDelta: 0,
-      volume: 0,
-      volumeDelta: 0,
+      transactionsDelta: s.txCount24h, // REAL: transações nas últimas 24h
+      volume: Number(s.volume24h / CHAIN.UNIT), // REAL: volume nativo transferido em 24h (EAV7)
+      volumeDelta: Number(s.volume24h / CHAIN.UNIT),
       staked: Number(s.staked / CHAIN.UNIT),
-      stakedDelta: 0,
+      stakedDelta: 0, // sem histórico → sem delta real (front oculta)
+      txSeries: s.txSeries, // série horária real (24 buckets) p/ o sparkline de transações
+      volSeries: s.volSeries, // série horária real de volume
     });
     return;
   }
