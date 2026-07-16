@@ -34,6 +34,20 @@ export function buildAiRevealTx(wallet, { taskId, output, salt, nonce, timestamp
   return buildTransaction(wallet, { type: 'AI_REVEAL', nonce, timestamp, data: { taskId, output, salt } });
 }
 
+// Fase 3 — janela de desafio.
+// Liquida uma tarefa não contestada (paga o oráculo) — permissionless.
+export function buildAiClaimTx(wallet, { taskId, nonce, timestamp }) {
+  return buildTransaction(wallet, { type: 'AI_CLAIM', nonce, timestamp, data: { taskId } });
+}
+// Contesta um resultado (posta a fiança AI_CHALLENGE_BOND).
+export function buildAiChallengeTx(wallet, { taskId, nonce, timestamp }) {
+  return buildTransaction(wallet, { type: 'AI_CHALLENGE', nonce, timestamp, data: { taskId } });
+}
+// Voto de oráculo-jurado numa disputa (valid = true/false).
+export function buildAiVerdictTx(wallet, { taskId, valid, nonce, timestamp }) {
+  return buildTransaction(wallet, { type: 'AI_VERDICT', nonce, timestamp, data: { taskId, valid: !!valid } });
+}
+
 // Reembolso do escrow ao solicitante após o prazo da tarefa.
 export function buildAiRefundTx(wallet, { taskId, nonce, timestamp }) {
   return buildTransaction(wallet, {

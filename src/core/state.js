@@ -1433,17 +1433,117 @@ export class State {
         const output = tx.data.output;
         if (typeof output !== 'string' || output.length === 0) throw new Error('output obrigatório');
         if (Buffer.byteLength(output) > CHAIN.MAX_AI_OUTPUT_BYTES) throw new Error('output excede o limite');
-        task.status = 'DONE';
         task.oracle = tx.from;
         task.output = output;
         task.resultHash = eavHash(output);
         task.completedAt = tx.timestamp;
         task.prompt = null; task.params = null; // poda a ENTRADA (fica no tx AI_TASK) — limita o crescimento de estado
-        oracle.tasksCompleted += 1;
-        // IA aprende: entrega bem-sucedida sobe a reputação do oráculo.
-        oracle.completed = (oracle.completed ?? 0) + 1;
-        oracle.reputation = Math.min(100, (oracle.reputation ?? 50) + 4);
-        acc.balance += task.reward;
+        if (height >= CHAIN.AI_CHALLENGE_HEIGHT) {
+          // Fase 3 — verificação otimista: a recompensa FICA em escrow numa janela de
+          // desafio. Só é liberada por AI_CLAIM (se não contestada) ou pelo veredito do
+          // júri (se contestada via AI_CHALLENGE). Reputação também fica pendente.
+          task.status = 'CHALLENGE_PERIOD';
+          task.challengeDeadline = blockTs + CHAIN.AI_CHALLENGE_WINDOW_MS;
+        } else {
+          // Fase 1 (grandfather): paga na hora + reputação sobe.
+          task.status = 'DONE';
+          oracle.tasksCompleted += 1;
+          oracle.completed = (oracle.completed ?? 0) + 1;
+          oracle.reputation = Math.min(100, (oracle.reputation ?? 50) + 4);
+          acc.balance += task.reward;
+        }
+        break;
+      }
+
+      // Fase 3 — CLAIM: liquida uma tarefa cuja janela de desafio fechou SEM contestação
+      // (paga o oráculo). Permissionless → nunca prende fundos. Também resolve uma disputa
+      // sem júri suficiente após o prazo (inconclusiva: resultado mantido, fiança devolvida).
+      case 'AI_CLAIM': {
+        if (height < CHAIN.AI_CHALLENGE_HEIGHT) throw new Error('desafio de IA ainda não ativo');
+        const task = this.aiTasks[tx.data.taskId];
+        if (!task) throw new Error('tarefa de IA inexistente');
+        if (acc.balance < fee) throw new Error('saldo insuficiente para a taxa');
+        acc.balance -= fee;
+        if (task.status === 'CHALLENGE_PERIOD') {
+          if (blockTs < task.challengeDeadline) throw new Error('janela de desafio ainda aberta');
+          this.credit(task.oracle, task.reward);
+          const o = this.oracles[task.oracle];
+          if (o) { o.tasksCompleted += 1; o.completed = (o.completed ?? 0) + 1; o.reputation = Math.min(100, (o.reputation ?? 50) + 4); }
+          task.status = 'DONE';
+        } else if (task.status === 'DISPUTED') {
+          if (blockTs < task.verdictDeadline) throw new Error('júri ainda no prazo');
+          if (Object.keys(task.votes ?? {}).length >= CHAIN.AI_VERDICT_QUORUM) throw new Error('disputa deve ser resolvida por veredito');
+          this.credit(task.oracle, task.reward); // inconclusiva → resultado mantido
+          this.credit(task.challenger, task.bond); // fiança devolvida (desafio de boa-fé)
+          task.status = 'DONE'; task.votes = {};
+        } else {
+          throw new Error('tarefa não está liquidável');
+        }
+        break;
+      }
+
+      // Fase 3 — CHALLENGE: qualquer conta contesta um resultado postando uma fiança.
+      case 'AI_CHALLENGE': {
+        if (height < CHAIN.AI_CHALLENGE_HEIGHT) throw new Error('desafio de IA ainda não ativo');
+        const task = this.aiTasks[tx.data.taskId];
+        if (!task) throw new Error('tarefa de IA inexistente');
+        if (task.status !== 'CHALLENGE_PERIOD') throw new Error('tarefa não está em janela de desafio');
+        if (blockTs >= task.challengeDeadline) throw new Error('janela de desafio expirada');
+        const bond = CHAIN.AI_CHALLENGE_BOND;
+        if (acc.balance < bond + fee) throw new Error('saldo insuficiente para a fiança do desafio');
+        acc.balance -= bond + fee;
+        task.status = 'DISPUTED';
+        task.challenger = tx.from;
+        task.bond = bond;
+        task.verdictDeadline = blockTs + CHAIN.AI_VERDICT_WINDOW_MS;
+        task.votes = {}; // oráculo-jurado -> bool (resultado válido?)
+        break;
+      }
+
+      // Fase 3 — VERDICT: oráculos-jurados votam se o resultado é válido; ao quórum, resolve
+      // e o PERDEDOR é slashado. Os jurados também aprendem (votar com a maioria sobe reputação).
+      case 'AI_VERDICT': {
+        if (height < CHAIN.AI_CHALLENGE_HEIGHT) throw new Error('desafio de IA ainda não ativo');
+        if (!this.oracles[tx.from]) throw new Error('só oráculo registrado pode julgar');
+        const task = this.aiTasks[tx.data.taskId];
+        if (!task || task.status !== 'DISPUTED') throw new Error('tarefa não está em disputa');
+        if (blockTs >= task.verdictDeadline) throw new Error('janela de veredito expirada');
+        if (tx.from === task.oracle || tx.from === task.challenger) throw new Error('parte interessada não pode julgar');
+        if (task.votes[tx.from] !== undefined) throw new Error('jurado já votou nesta disputa');
+        if (acc.balance < fee) throw new Error('saldo insuficiente para a taxa');
+        acc.balance -= fee;
+        task.votes[tx.from] = tx.data.valid === true;
+        const votes = Object.values(task.votes);
+        if (votes.length >= CHAIN.AI_VERDICT_QUORUM) {
+          const validCount = votes.filter((v) => v).length;
+          const upheld = validCount > votes.length / 2; // maioria: resultado válido?
+          const oracle = this.oracles[task.oracle];
+          const jurors = Object.keys(task.votes);
+          if (upheld) {
+            // MANTIDO: oráculo leva reward + a fiança (desafio infundado).
+            this.credit(task.oracle, task.reward + task.bond);
+            if (oracle) { oracle.tasksCompleted += 1; oracle.completed = (oracle.completed ?? 0) + 1; oracle.reputation = Math.min(100, (oracle.reputation ?? 50) + 4); }
+            task.status = 'UPHELD';
+          } else {
+            // DERRUBADO: requester reembolsado; oráculo slashado (bounty ao desafiante,
+            // que recupera a fiança).
+            this.credit(task.requester, task.reward);
+            let bounty = 0n;
+            if (oracle) {
+              oracle.failed = (oracle.failed ?? 0) + 1;
+              oracle.reputation = Math.max(0, (oracle.reputation ?? 50) - 12);
+              bounty = (oracle.stake ?? 0n) < CHAIN.AI_ORACLE_SLASH ? (oracle.stake ?? 0n) : CHAIN.AI_ORACLE_SLASH;
+              if (bounty > 0n) { oracle.stake -= bounty; oracle.slashed = (oracle.slashed ?? 0n) + bounty; }
+            }
+            this.credit(task.challenger, task.bond + bounty);
+            task.status = 'OVERTURNED';
+          }
+          for (const j of jurors) {
+            const jo = this.oracles[j];
+            if (jo) jo.reputation = task.votes[j] === upheld ? Math.min(100, (jo.reputation ?? 50) + 2) : Math.max(0, (jo.reputation ?? 50) - 4);
+          }
+          task.output = null; task.votes = {}; // poda
+        }
         break;
       }
 
