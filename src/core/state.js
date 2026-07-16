@@ -1350,6 +1350,26 @@ export class State {
         if (typeof prompt !== 'string' || prompt.length === 0) throw new Error('prompt obrigatório');
         if (Buffer.byteLength(prompt) > CHAIN.MAX_AI_PROMPT_BYTES) throw new Error('prompt excede o limite');
         if (amount <= 0n) throw new Error('recompensa da tarefa deve ser positiva');
+        // Fase 2: modo QUÓRUM (commit-reveal) — N oráculos independentes em vez de um
+        // único designado. Elimina o ponto único de confiança.
+        if (height >= CHAIN.AI_QUORUM_HEIGHT && tx.data.quorum != null) {
+          const q = Number(tx.data.quorum);
+          if (!Number.isInteger(q) || q < CHAIN.MIN_AI_QUORUM || q > CHAIN.MAX_AI_QUORUM) {
+            throw new Error(`quórum inválido (${CHAIN.MIN_AI_QUORUM}..${CHAIN.MAX_AI_QUORUM})`);
+          }
+          if (acc.balance < amount + fee) throw new Error('saldo insuficiente para escrow da recompensa');
+          acc.balance -= amount + fee;
+          this.aiTasks[tx.id] = {
+            id: tx.id, requester: tx.from, mode: 'QUORUM', quorum: q,
+            model: typeof model === 'string' ? model : null, prompt, params: tx.data.params ?? null,
+            reward: amount, status: 'PENDING', phase: 'COMMIT', createdAt: blockTs,
+            commitDeadline: blockTs + CHAIN.AI_COMMIT_WINDOW_MS,
+            revealDeadline: blockTs + CHAIN.AI_COMMIT_WINDOW_MS + CHAIN.AI_REVEAL_WINDOW_MS,
+            expiresAt: blockTs + CHAIN.AI_COMMIT_WINDOW_MS + CHAIN.AI_REVEAL_WINDOW_MS,
+            commits: {}, reveals: {}, winners: null, resultHash: null, output: null, completedAt: null,
+          };
+          break;
+        }
         // Oráculo designado obrigatório: o solicitante escolhe em quem confia; só
         // esse oráculo pode resgatar a recompensa. Impede que qualquer oráculo
         // registrado saque o escrow com um output lixo.
@@ -1427,6 +1447,71 @@ export class State {
         break;
       }
 
+      // Fase 2 — COMMIT: oráculo trava o hash(output|salt) antes de ver as respostas
+      // dos outros. Impede copie-e-cole entre oráculos.
+      case 'AI_COMMIT': {
+        if (height < CHAIN.AI_QUORUM_HEIGHT) throw new Error('quórum de IA ainda não ativo');
+        if (!this.oracles[tx.from]) throw new Error('remetente não é um oráculo de IA registrado');
+        const task = this.aiTasks[tx.data.taskId];
+        if (!task || task.mode !== 'QUORUM') throw new Error('tarefa de quórum inexistente');
+        if (task.status !== 'PENDING' || task.phase !== 'COMMIT') throw new Error('fase de commit encerrada');
+        if (blockTs >= task.commitDeadline) throw new Error('janela de commit expirada');
+        if (task.commits[tx.from]) throw new Error('oráculo já commitou nesta tarefa');
+        const commit = tx.data.commit;
+        if (typeof commit !== 'string' || !/^E7[0-9A-Fa-f]{62}$/.test(commit)) throw new Error('commit inválido (hash E7)');
+        if (acc.balance < fee) throw new Error('saldo insuficiente para a taxa');
+        acc.balance -= fee;
+        task.commits[tx.from] = commit;
+        break;
+      }
+
+      // Fase 2 — REVEAL: oráculo revela (output, salt); verifica-se contra o commit.
+      // Quando >= quorum revelam o MESMO resultado, a tarefa conclui e a recompensa é
+      // dividida entre eles (a IA aprende: acerto sobe reputação, minoria divergente cai).
+      case 'AI_REVEAL': {
+        if (height < CHAIN.AI_QUORUM_HEIGHT) throw new Error('quórum de IA ainda não ativo');
+        if (!this.oracles[tx.from]) throw new Error('remetente não é um oráculo de IA registrado');
+        const task = this.aiTasks[tx.data.taskId];
+        if (!task || task.mode !== 'QUORUM') throw new Error('tarefa de quórum inexistente');
+        if (task.status !== 'PENDING') throw new Error('tarefa já concluída');
+        const committed = task.commits[tx.from];
+        if (!committed) throw new Error('oráculo não commitou nesta tarefa');
+        if (task.reveals[tx.from]) throw new Error('oráculo já revelou');
+        if (blockTs < task.commitDeadline) throw new Error('a janela de reveal ainda não abriu');
+        if (blockTs >= task.revealDeadline) throw new Error('janela de reveal expirada');
+        const { output, salt } = tx.data;
+        if (typeof output !== 'string' || output.length === 0) throw new Error('output obrigatório');
+        if (Buffer.byteLength(output) > CHAIN.MAX_AI_OUTPUT_BYTES) throw new Error('output excede o limite');
+        if (typeof salt !== 'string' || salt.length === 0 || salt.length > 128) throw new Error('salt inválido');
+        if (eavHash(`${output}|${salt}`) !== committed.toUpperCase()) throw new Error('reveal não confere com o commit');
+        if (acc.balance < fee) throw new Error('saldo insuficiente para a taxa');
+        acc.balance -= fee;
+        task.reveals[tx.from] = { resultHash: eavHash(output), output };
+        // Apura: algum resultHash atingiu o quórum?
+        const counts = {};
+        for (const r of Object.values(task.reveals)) counts[r.resultHash] = (counts[r.resultHash] ?? 0) + 1;
+        let winHash = null;
+        for (const [h, c] of Object.entries(counts)) if (c >= task.quorum) { winHash = h; break; }
+        if (winHash) {
+          const winners = Object.keys(task.reveals).filter((a) => task.reveals[a].resultHash === winHash);
+          const losers = Object.keys(task.reveals).filter((a) => task.reveals[a].resultHash !== winHash);
+          task.status = 'DONE'; task.phase = 'DONE'; task.resultHash = winHash;
+          task.output = task.reveals[winners[0]].output; task.completedAt = tx.timestamp; task.winners = winners;
+          const share = task.reward / BigInt(winners.length);
+          const rem = task.reward - share * BigInt(winners.length);
+          winners.forEach((a, i) => {
+            this.credit(a, share + (i === 0 ? rem : 0n));
+            const o = this.oracles[a];
+            if (o) { o.completed = (o.completed ?? 0) + 1; o.tasksCompleted += 1; o.reputation = Math.min(100, (o.reputation ?? 50) + 4); }
+          });
+          losers.forEach((a) => { const o = this.oracles[a]; if (o) { o.failed = (o.failed ?? 0) + 1; o.reputation = Math.max(0, (o.reputation ?? 50) - 12); } });
+          // poda entradas e outputs (mantém só os resultHash) — limita o crescimento de estado
+          task.prompt = null; task.params = null;
+          for (const a of Object.keys(task.reveals)) task.reveals[a] = { resultHash: task.reveals[a].resultHash };
+        }
+        break;
+      }
+
       // Reembolso do escrow ao solicitante se a tarefa não foi atendida até o
       // prazo (evita fundos presos caso o oráculo designado suma).
       case 'AI_REFUND': {
@@ -1443,7 +1528,19 @@ export class State {
         // tarefa expirar sem entrega é responsabilizado — perde reputação e é slashado
         // em AI_ORACLE_SLASH, que vai como COMPENSAÇÃO ao solicitante (além do refund).
         // Conserva supply: o slash sai do STAKE travado do oráculo.
-        if (height >= CHAIN.AI_ACCOUNTABILITY_HEIGHT) {
+        if (task.mode === 'QUORUM') {
+          // Fase 2: tarefa de quórum expirada sem consenso. Oráculos que commitaram mas
+          // NÃO revelaram desperdiçaram a tarefa → perdem reputação (IA aprende a filtrá-los).
+          if (height >= CHAIN.AI_QUORUM_HEIGHT) {
+            for (const a of Object.keys(task.commits ?? {})) {
+              if (!task.reveals?.[a]) {
+                const o = this.oracles[a];
+                if (o) { o.failed = (o.failed ?? 0) + 1; o.reputation = Math.max(0, (o.reputation ?? 50) - 8); }
+              }
+            }
+          }
+          task.commits = {}; task.reveals = {}; // poda
+        } else if (height >= CHAIN.AI_ACCOUNTABILITY_HEIGHT) {
           const orc = this.oracles[task.assignedOracle];
           if (orc) {
             orc.failed = (orc.failed ?? 0) + 1;

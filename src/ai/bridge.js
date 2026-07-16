@@ -7,15 +7,31 @@
 //   3. AI_RESULT      — oráculo entrega o output; a hash E7 do resultado fica
 //                       gravada on-chain e a recompensa é liberada para ele
 import { buildTransaction } from '../core/transaction.js';
+import { eavHash } from '../crypto/hash.js';
 
-export function buildAiTaskTx(wallet, { prompt, oracle, model = null, params = null, reward, nonce, timestamp }) {
+// AI_TASK com oráculo designado (Fase 1) OU quórum de N oráculos (Fase 2, passe `quorum`).
+export function buildAiTaskTx(wallet, { prompt, oracle = null, quorum = null, model = null, params = null, reward, nonce, timestamp }) {
   return buildTransaction(wallet, {
     type: 'AI_TASK',
     amount: reward,
     nonce,
     timestamp,
-    data: { prompt, oracle, model, params },
+    data: quorum != null ? { prompt, quorum, model, params } : { prompt, oracle, model, params },
   });
+}
+
+// Compromisso de commit-reveal: hash(output|salt). O oráculo commita isto e só
+// depois revela (output, salt) — impede copiar a resposta de outro oráculo.
+export function aiCommitHash(output, salt) {
+  return eavHash(`${output}|${salt}`);
+}
+
+export function buildAiCommitTx(wallet, { taskId, commit, nonce, timestamp }) {
+  return buildTransaction(wallet, { type: 'AI_COMMIT', nonce, timestamp, data: { taskId, commit } });
+}
+
+export function buildAiRevealTx(wallet, { taskId, output, salt, nonce, timestamp }) {
+  return buildTransaction(wallet, { type: 'AI_REVEAL', nonce, timestamp, data: { taskId, output, salt } });
 }
 
 // Reembolso do escrow ao solicitante após o prazo da tarefa.
