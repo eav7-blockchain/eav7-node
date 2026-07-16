@@ -10,12 +10,19 @@ import { buildTransaction } from '../core/transaction.js';
 import { eavHash } from '../crypto/hash.js';
 
 // AI_TASK: oráculo designado (Fase 1), quórum de N (Fase 2, `quorum`) ou ABERTA/leilão
-// (Fase 4, `open: true` — `reward` vira o orçamento máximo).
-export function buildAiTaskTx(wallet, { prompt, oracle = null, quorum = null, open = false, model = null, params = null, reward, nonce, timestamp }) {
-  const data = open ? { prompt, open: true, model, params }
+// (Fase 4, `open: true`). `private: true` (Fase 5) marca a tarefa como privada — o
+// `prompt` deve ir cifrado (o protocolo só guarda bytes) e o resultado fica off-chain.
+export function buildAiTaskTx(wallet, { prompt, oracle = null, quorum = null, open = false, private: priv = false, model = null, params = null, reward, nonce, timestamp }) {
+  const base = open ? { prompt, open: true, model, params }
     : quorum != null ? { prompt, quorum, model, params }
     : { prompt, oracle, model, params };
+  const data = priv ? { ...base, private: true } : base;
   return buildTransaction(wallet, { type: 'AI_TASK', amount: reward, nonce, timestamp, data });
+}
+
+// Compromisso de um resultado: hash E7 do output (usado no modo hash-only da Fase 5).
+export function aiResultHash(output) {
+  return eavHash(output);
 }
 
 // Fase 4 — leilão.
@@ -84,11 +91,11 @@ export function buildOracleRegisterTx(wallet, { stake, endpoint = null, nonce, t
   });
 }
 
-export function buildAiResultTx(wallet, { taskId, output, nonce, timestamp }) {
-  return buildTransaction(wallet, {
-    type: 'AI_RESULT',
-    nonce,
-    timestamp,
-    data: { taskId, output },
-  });
+// Entrega o resultado. Modo padrão: `output` (plaintext on-chain). Modo hash-only da
+// Fase 5: passe `resultHash` (+ `resultUri` opcional) — o output real fica off-chain.
+export function buildAiResultTx(wallet, { taskId, output = null, resultHash = null, resultUri = null, nonce, timestamp }) {
+  const data = resultHash != null
+    ? { taskId, resultHash, ...(resultUri != null ? { resultUri } : {}) }
+    : { taskId, output };
+  return buildTransaction(wallet, { type: 'AI_RESULT', nonce, timestamp, data });
 }

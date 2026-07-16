@@ -195,6 +195,13 @@ export const CHAIN = {
   // Fork-gated; no gênese-ativo (testnet) nasce ligado.
   AI_MARKET_HEIGHT: 1_820_000,
   AI_BID_WINDOW_MS: 30 * 60_000, // janela para lances numa tarefa aberta
+  // Resultados verificáveis/privados (Fase 5). A PARTIR de AI_PRIVATE_HEIGHT, o AI_RESULT
+  // pode gravar SÓ o hash (`resultHash`) + um ponteiro opcional (`resultUri`) em vez do
+  // output completo: o resultado real fica off-chain (cifrado p/ o solicitante em tarefas
+  // `private`), verificável por qualquer um (hash(output) == resultHash). Estado enxuto +
+  // privacidade. Fork-gated; no gênese-ativo (testnet) nasce ligado.
+  AI_PRIVATE_HEIGHT: 1_840_000,
+  MAX_AI_URI_BYTES: 512,
 
   // Limites anti-DoS (mempool, rede, RPC, respostas).
   MAX_MEMPOOL: 5_000,
@@ -350,6 +357,7 @@ export const FORK_HEIGHTS = [
   'BRIDGE_PROOF_HEIGHT', 'VOTING_HEIGHT', 'PERMISSIONS_HEIGHT', 'RESOURCE_HEIGHT', 'GOVERNANCE_HEIGHT',
   'VESTING_HEIGHT', 'META_HEIGHT', 'TOKEN_ADMIN_HEIGHT', 'NFT_HEIGHT', 'NAME_HEIGHT',
   'AI_ACCOUNTABILITY_HEIGHT', 'AI_QUORUM_HEIGHT', 'AI_CHALLENGE_HEIGHT', 'AI_MARKET_HEIGHT',
+  'AI_PRIVATE_HEIGHT',
 ];
 // SLASHING_HEIGHT é DELIBERADAMENTE excluído do gênese-ativo: a detecção de assinatura
 // dupla ainda não distingue equivocação maliciosa de um validador honesto re-produzindo

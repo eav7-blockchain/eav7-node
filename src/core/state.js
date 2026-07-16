@@ -1399,6 +1399,7 @@ export class State {
           prompt,
           params: tx.data.params ?? null,
           reward: amount,
+          private: tx.data.private === true, // Fase 5: tarefa privada (prompt/output cifrados off-chain)
           status: 'PENDING',
           createdAt: blockTs,
           // H-2: expiração ancorada no timestamp REAL do bloco (validado por drift),
@@ -1445,12 +1446,31 @@ export class State {
         if (task.status !== 'PENDING') throw new Error('tarefa de IA já concluída');
         // Só o oráculo designado pela tarefa pode entregar o resultado.
         if (task.assignedOracle !== tx.from) throw new Error('remetente não é o oráculo designado para esta tarefa');
-        const output = tx.data.output;
-        if (typeof output !== 'string' || output.length === 0) throw new Error('output obrigatório');
-        if (Buffer.byteLength(output) > CHAIN.MAX_AI_OUTPUT_BYTES) throw new Error('output excede o limite');
+        // Fase 5: modo HASH-ONLY (resultado verificável/privado) — o oráculo grava só o
+        // compromisso (resultHash) + ponteiro opcional; o output real fica off-chain
+        // (cifrado p/ o solicitante em tarefas private). Abaixo do fork, output é obrigatório.
+        let output = null, resultHash, resultUri = null;
+        if (height >= CHAIN.AI_PRIVATE_HEIGHT && tx.data.resultHash != null) {
+          if (typeof tx.data.resultHash !== 'string' || !/^E7[0-9A-Fa-f]{62}$/.test(tx.data.resultHash)) {
+            throw new Error('resultHash inválido (hash E7)');
+          }
+          resultHash = tx.data.resultHash.toUpperCase();
+          if (tx.data.resultUri != null) {
+            if (typeof tx.data.resultUri !== 'string' || Buffer.byteLength(tx.data.resultUri) > CHAIN.MAX_AI_URI_BYTES) {
+              throw new Error('resultUri inválido');
+            }
+            resultUri = tx.data.resultUri;
+          }
+        } else {
+          output = tx.data.output;
+          if (typeof output !== 'string' || output.length === 0) throw new Error('output obrigatório');
+          if (Buffer.byteLength(output) > CHAIN.MAX_AI_OUTPUT_BYTES) throw new Error('output excede o limite');
+          resultHash = eavHash(output);
+        }
         task.oracle = tx.from;
-        task.output = output;
-        task.resultHash = eavHash(output);
+        task.output = output; // null no modo hash-only (resultado off-chain)
+        task.resultHash = resultHash;
+        task.resultUri = resultUri;
         task.completedAt = tx.timestamp;
         task.prompt = null; task.params = null; // poda a ENTRADA (fica no tx AI_TASK) — limita o crescimento de estado
         if (height >= CHAIN.AI_CHALLENGE_HEIGHT) {
