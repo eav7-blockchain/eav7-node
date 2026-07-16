@@ -363,6 +363,19 @@ export class Blockchain {
     return tx ? { tx, blockHeight: height, blockHash: block.hash } : null;
   }
 
+  // Metadados (altura, produtor, timestamp) dos últimos `maxCount` blocos disponíveis
+  // na janela em RAM — insumo do score de desempenho de validador ([[eav7-ai-roadmap]]).
+  // É LEITURA pura, O(janela), sem tocar consenso/estado.
+  recentProducerMeta(maxCount = 500) {
+    const out = [];
+    const lo = Math.max(1, this.tailStart ?? 1, this.height - maxCount + 1);
+    for (let h = lo; h <= this.height; h++) {
+      const b = this.getBlock(h);
+      if (b) out.push({ height: b.height, producer: b.producer, timestamp: b.timestamp });
+    }
+    return out;
+  }
+
   // Finalidade BFT (#2): maior altura FINALIZADA — aquela sobre a qual >= 2/3+1
   // validadores DISTINTOS já produziram. Determinística da cadeia (produtores estão
   // nos blocos), sem subprotocolo de votos. Um reorg não pode reverter abaixo disto.

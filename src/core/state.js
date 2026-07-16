@@ -7,7 +7,7 @@ import { verifyTransaction } from './transaction.js';
 import { runEavm, EavmError } from '../eavm/vm.js';
 import { createHost } from '../eavm/host.js';
 import { keccak256 } from '../eavm/keccak.js';
-import { bridgeEventDigest, verifyCommitteeProof, committeeUpdateDigest } from '../bridge/proof.js';
+import { bridgeEventDigest, verifyCommitteeProof, committeeUpdateDigest, aiAttestDigest } from '../bridge/proof.js';
 
 // Máquina de estado do protocolo eav20. Valores monetários são BigInt.
 // applyTransaction valida TUDO antes de mutar — uma transação que lança erro
@@ -18,6 +18,7 @@ export class State {
     this.tokens = {}; // tokenId (hash E7) -> token EAV20
     this.aiTasks = {}; // taskId (id da tx AI_TASK) -> tarefa de IA
     this.oracles = {}; // addr -> oráculo de IA registrado
+    this.aiAttesters = {}; // Fase 6: attesterId -> { kind, members:[ethAddr], quorum, measurement } (registrado por governança a partir de AI_TEE_HEIGHT)
     // Ponte cross-chain. processedInbound deduplica depósitos de origem já
     // liberados; attestations acumula os relayers que atestaram cada depósito
     // até atingir o quórum (BRIDGE_MIN_ATTESTATIONS).
@@ -350,6 +351,16 @@ export class State {
       .map(({ address, staked, votes }) => ({ address, staked, votes }));
   }
 
+  // Nº de contas ELEGÍVEIS a validador (self-stake >= mínimo, não-EAVM), SEM o corte de
+  // MAX_VALIDATORS. Mede a DEMANDA por slots — insumo do conselheiro de governança
+  // ([[eav7-ai-roadmap]]). O chamador deve cachear por altura (varre contas — achado M2).
+  eligibleValidatorCount() {
+    const minStake = this.param('MIN_VALIDATOR_STAKE');
+    let n = 0;
+    for (const acc of Object.values(this.accounts)) if (acc.staked >= minStake && !acc.eavmManaged) n += 1;
+    return n;
+  }
+
   // #9: coage/valida o valor proposto para um parâmetro governável (tipo + limites).
   #coerceGovValue(spec, raw) {
     if (spec.kind === 'bigint') {
@@ -374,6 +385,26 @@ export class State {
     const quorum = Number(v.quorum);
     if (!Number.isSafeInteger(quorum) || quorum <= 0 || quorum > members.length) throw new Error('quorum inválido');
     return { sourceChain: sourceChain.toUpperCase(), members, quorum };
+  }
+
+  // Fase 6: valida um ATESTADOR de IA proposto por governança (enclave TEE / verificador
+  // zk). members = endereços eth das chaves de atestação; measurement = medida do enclave/
+  // commitment do modelo (o código atestado). Espelha #validateCommitteeValue.
+  #validateAttesterValue(v) {
+    if (!v || typeof v !== 'object') throw new Error('valor de atestador inválido');
+    const attesterId = String(v.attesterId ?? '');
+    if (!/^[A-Z0-9_.-]{2,64}$/i.test(attesterId)) throw new Error('attesterId inválido');
+    const kind = String(v.kind ?? 'TEE').toUpperCase();
+    if (kind !== 'TEE' && kind !== 'ZK') throw new Error('kind deve ser TEE ou ZK');
+    const members = (v.members ?? []).map((m) => String(m).toLowerCase());
+    if (members.length === 0 || members.length > CHAIN.MAX_AI_ATTESTER_MEMBERS) throw new Error('nº de membros inválido');
+    if (new Set(members).size !== members.length) throw new Error('membros duplicados');
+    for (const m of members) if (!/^0x[0-9a-f]{40}$/.test(m)) throw new Error('endereço de membro inválido (eth 0x+40 hex)');
+    const quorum = Number(v.quorum);
+    if (!Number.isSafeInteger(quorum) || quorum <= 0 || quorum > members.length) throw new Error('quorum inválido');
+    const measurement = String(v.measurement ?? '');
+    if (measurement.length === 0 || measurement.length > 256) throw new Error('measurement inválida (1..256 chars)');
+    return { attesterId, kind, members, quorum, measurement };
   }
 
   // Valida um gasto de tesouraria proposto por governança.
@@ -421,6 +452,10 @@ export class State {
         } else if (p.param === 'TREASURY_SPEND') {
           const amt = BigInt(p.value.amount); // gasta só se a tesouraria cobre (senão a proposta não tem efeito)
           if (this.treasury >= amt) { this.treasury -= amt; this.credit(p.value.recipient, amt); }
+        } else if (p.param === 'AI_ATTESTER') {
+          // Fase 6: registra/atualiza o atestador de IA (enclave TEE / verificador zk).
+          const v = p.value;
+          this.aiAttesters[v.attesterId] = { kind: v.kind, members: v.members, quorum: v.quorum, measurement: v.measurement, registeredAt: height };
         } else {
           const prev = Object.prototype.hasOwnProperty.call(this.params, p.param) ? this.params[p.param] : undefined;
           this.params[p.param] = p.value; // aplica o override (efeito persiste em params)
@@ -469,6 +504,7 @@ export class State {
     copy.tokens = structuredClone(this.tokens);
     copy.aiTasks = structuredClone(this.aiTasks);
     copy.oracles = structuredClone(this.oracles);
+    copy.aiAttesters = structuredClone(this.aiAttesters);
     copy.bridge = structuredClone(this.bridge);
     copy.bridgeRelayers = structuredClone(this.bridgeRelayers);
     copy.bridgeSourceCommittees = structuredClone(this.bridgeSourceCommittees);
@@ -966,6 +1002,9 @@ export class State {
           value = this.#validateCommitteeValue(tx.data?.value);
         } else if (param === 'TREASURY_SPEND') {
           value = this.#validateTreasurySpend(tx.data?.value);
+        } else if (param === 'AI_ATTESTER') {
+          if (height < CHAIN.AI_TEE_HEIGHT) throw new Error('atestação de IA (Fase 6) ainda não ativa');
+          value = this.#validateAttesterValue(tx.data?.value);
         } else {
           const spec = CHAIN.GOVERNABLE[param];
           if (!spec) throw new Error(`parâmetro não governável: ${param}`);
@@ -1473,7 +1512,31 @@ export class State {
         task.resultUri = resultUri;
         task.completedAt = tx.timestamp;
         task.prompt = null; task.params = null; // poda a ENTRADA (fica no tx AI_TASK) — limita o crescimento de estado
-        if (height >= CHAIN.AI_CHALLENGE_HEIGHT) {
+        // Fase 6 — ATESTAÇÃO (TEE/zk): se o resultado vem com uma prova de um atestador
+        // REGISTRADO (>= quórum de assinaturas sobre o digest taskId/resultHash/measurement),
+        // é VERIFICADO criptograficamente. `verified` só é setado quando de fato atestado →
+        // abaixo do fork / sem atestação, o campo NEM existe (serialização de task inalterada
+        // → replay-safe). Forjar exige as chaves do enclave, não confiar no oráculo.
+        let verified = null;
+        if (height >= CHAIN.AI_TEE_HEIGHT && tx.data.attestation != null) {
+          const att = tx.data.attestation;
+          const attester = this.aiAttesters[att?.attesterId];
+          if (!attester) throw new Error('atestador de IA não registrado');
+          const digest = aiAttestDigest({ taskId: tx.data.taskId, resultHash, attesterId: att.attesterId, measurement: attester.measurement });
+          const valid = verifyCommitteeProof(digest, att.sigs, attester);
+          if (valid < attester.quorum) throw new Error(`atestação insuficiente (${valid}/${attester.quorum})`);
+          verified = attester.kind; // 'TEE' | 'ZK'
+        }
+        if (verified) {
+          // Fase 6: resultado atestado — liquida NA HORA, sem janela de desafio nem
+          // dependência de reputação (é criptograficamente verificado).
+          task.verified = verified;
+          task.status = 'DONE';
+          oracle.tasksCompleted += 1;
+          oracle.completed = (oracle.completed ?? 0) + 1;
+          oracle.reputation = Math.min(100, (oracle.reputation ?? 50) + 4);
+          acc.balance += task.reward;
+        } else if (height >= CHAIN.AI_CHALLENGE_HEIGHT) {
           // Fase 3 — verificação otimista: a recompensa FICA em escrow numa janela de
           // desafio. Só é liberada por AI_CLAIM (se não contestada) ou pelo veredito do
           // júri (se contestada via AI_CHALLENGE). Reputação também fica pendente.
@@ -1859,6 +1922,25 @@ export class State {
           } else if (this.bridge.lockedNative < amount) {
             throw new Error('ponte não possui EAV7 travado suficiente');
           }
+          // Circuit breaker (auto-mitigação de consenso): a soma das liberações do ativo
+          // na janela deslizante não pode exceder BRIDGE_BREAKER_BPS do pool no início da
+          // janela. Falha FECHADA — bloqueia dreno rápido de relayer/comitê comprometido
+          // (achado C1). Determinístico (altura+valores são consenso). Fork-gated p/ não
+          // mexer na serialização de bridge (stateRoot) antes do rollout coordenado.
+          if (height >= CHAIN.BRIDGE_BREAKER_HEIGHT) {
+            const asset = token ?? 'NATIVE';
+            const cutoff = height - CHAIN.BRIDGE_BREAKER_WINDOW_BLOCKS;
+            let windowSum = 0n;
+            for (const r of this.bridge.releaseLog ?? []) {
+              if (r.height > cutoff && r.asset === asset) windowSum += BigInt(r.amount);
+            }
+            const locked = token != null ? (this.bridge.lockedTokens[token] ?? 0n) : this.bridge.lockedNative;
+            const poolAtStart = locked + windowSum; // `locked` já exclui as liberações da janela
+            const cap = (poolAtStart * BigInt(this.param('BRIDGE_BREAKER_BPS'))) / 10_000n;
+            if (windowSum + amount > cap) {
+              throw new Error(`circuit breaker da ponte: limite de velocidade atingido (janela ${windowSum + amount} > cap ${cap})`);
+            }
+          }
         }
 
         // --- mutação (todas as validações passaram) ---
@@ -1881,6 +1963,14 @@ export class State {
         } else {
           this.bridge.lockedNative -= amount;
           this.credit(tx.to, amount);
+        }
+        // Registra a liberação na janela do circuit breaker (só cria releaseLog a partir
+        // do fork → serialização de bridge inalterada antes dele, preservando o stateRoot
+        // histórico). Poda p/ manter o log enxuto e determinístico.
+        if (height >= CHAIN.BRIDGE_BREAKER_HEIGHT) {
+          (this.bridge.releaseLog ??= []).push({ height, asset: token ?? 'NATIVE', amount: amount.toString() });
+          const cutoff = height - CHAIN.BRIDGE_BREAKER_WINDOW_BLOCKS;
+          this.bridge.releaseLog = this.bridge.releaseLog.filter((r) => r.height > cutoff);
         }
         this.bridge.processedInbound[replayKey] = tx.id;
         delete this.bridge.attestations[attKey];

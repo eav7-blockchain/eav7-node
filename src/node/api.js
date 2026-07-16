@@ -5,8 +5,10 @@ import { CHAIN, toJson, formatEav7 } from '../config.js';
 import { isValidAddress } from '../crypto/keys.js';
 import { tokenView, tokenBalanceOf, EAV20_STANDARD } from '../token/eav20.js';
 import { eavmToE7, isEavmAddress, buildEavmEnvelope } from '../eavm/envelope.js';
-import { createRateLimiter } from './ratelimit.js';
+import { createRateLimiter, clientIp } from './ratelimit.js';
 import { accountProof as stateProof } from '../core/stateroot.js';
+import { scoreValidators } from './validator-score.js';
+import { adviseGovernance } from './governance-advisor.js';
 
 const rateLimit = createRateLimiter();
 
@@ -18,6 +20,7 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 // fecha o DoS assimético de varredura full-state por request (achado M2).
 let statsCache = { height: -1, value: null };
 let searchIndexCache = { height: -1, sorted: null };
+let eligibleCache = { height: -1, value: 0 }; // contagem de validadores elegíveis (conselheiro de governança)
 
 const NATIVE_VOLUME_TYPES = new Set(['TRANSFER', 'EAVM_TRANSFER']);
 const STATS_BUCKETS = 24; // séries horárias (24h)
@@ -238,7 +241,15 @@ async function handle(node, req, res) {
     res.end();
     return;
   }
+  const ip = clientIp(req);
+  // Auto-mitigação (operacional/reversível): IP com bloqueio ativo é recusado de imediato.
+  if (node.guard?.blocked(ip)) {
+    res.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '600' });
+    res.end(JSON.stringify({ error: 'IP temporariamente bloqueado por abuso — expira automaticamente' }));
+    return;
+  }
   if (!rateLimit(req)) {
+    node.guard?.strike(ip, 1); // flood de rate-limit conta como falta leve
     res.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '10' });
     res.end(JSON.stringify({ error: 'muitas requisições — tente novamente em instantes' }));
     return;
@@ -252,7 +263,9 @@ async function handle(node, req, res) {
   const POST = req.method === 'POST';
 
   // Encaminha ao frontend Next (navegação/RSC/assets). A API e o P2P seguem abaixo.
-  if ((GET || req.method === 'HEAD') && isWebRequest(req, url.pathname)) {
+  // /gateway é endpoint de API (JSON) sem página no front → não vai ao proxy web,
+  // assim abre direto no navegador (senão o Next devolveria "não existe").
+  if ((GET || req.method === 'HEAD') && url.pathname !== '/gateway' && isWebRequest(req, url.pathname)) {
     proxyToWeb(req, res, node);
     return;
   }
@@ -364,8 +377,13 @@ async function handle(node, req, res) {
   if (POST && parts[0] === 'eavm' && parts[1] === 'tx') {
     const { raw } = await readBody(req);
     if (typeof raw !== 'string') return send(res, 400, { error: 'campo raw (0x…) obrigatório' });
-    const envelope = buildEavmEnvelope(raw, { state });
-    send(res, 200, node.submitTransaction(envelope));
+    try {
+      const envelope = buildEavmEnvelope(raw, { state });
+      send(res, 200, node.submitTransaction(envelope));
+    } catch (err) {
+      node.guard?.strike(ip, 3); // tx inválida em série = provável abuso (falta grave)
+      throw err;
+    }
     return;
   }
 
@@ -401,6 +419,14 @@ async function handle(node, req, res) {
         lockedNative: state.bridge.lockedNative,
       },
       security: { alerts: node.securityAlerts.length },
+      // Alturas dos forks DORMENTES (rollout coordenado) — todos os nós DEVEM reportar o
+      // MESMO valor antes de a cadeia cruzá-las, senão divergem. Ver docs/rollout-forks.md.
+      forkHeights: {
+        bridgeBreaker: CHAIN.BRIDGE_BREAKER_HEIGHT,
+        aiTee: CHAIN.AI_TEE_HEIGHT,
+        bridgeQuorum: CHAIN.BRIDGE_QUORUM_HEIGHT,
+        canonicalHash: CHAIN.CANONICAL_HASH_HEIGHT,
+      },
       eavm: node.eavmEnabled
         ? { chainId: CHAIN.EAVM_CHAIN_ID, rpcPort: node.eavmPort, decimals: 18, rpcUrl: node.publicRpcUrl }
         : null,
@@ -420,6 +446,20 @@ async function handle(node, req, res) {
       peers: g?.snapshot?.peers ?? [],
       at: g?.snapshot?.at ?? null,
     });
+    return;
+  }
+
+  // Auto-mitigação: bloqueios de IP ativos (operacional, TTL). Observabilidade pública.
+  if (GET && parts[0] === 'guard' && parts.length === 1) {
+    send(res, 200, node.guard ? node.guard.snapshot() : { enabled: false });
+    return;
+  }
+  // Admin: desbloqueia um IP manualmente (default-deny sem token — como /peers, /alerts).
+  if (POST && parts[0] === 'guard' && parts[1] === 'clear' && parts.length === 2) {
+    if (!node.checkAdmin(req)) return send(res, 403, { error: 'não autorizado' });
+    const { ip: target } = await readBody(req);
+    if (typeof target !== 'string' || !target) return send(res, 400, { error: 'campo ip obrigatório' });
+    send(res, 200, { cleared: node.guard?.clear(target) ?? false, ip: target });
     return;
   }
 
@@ -476,7 +516,12 @@ async function handle(node, req, res) {
   // ---- transações -----------------------------------------------------------
   if (POST && parts[0] === 'tx') {
     const tx = await readBody(req);
-    send(res, 200, node.submitTransaction(tx));
+    try {
+      send(res, 200, node.submitTransaction(tx));
+    } catch (err) {
+      node.guard?.strike(ip, 3); // tx inválida em série = provável abuso (falta grave)
+      throw err;
+    }
     return;
   }
 
@@ -717,13 +762,33 @@ async function handle(node, req, res) {
     return;
   }
 
+  // Score de desempenho de validador (leitura pura da cadeia; sem consenso). Detalhado.
+  if (GET && parts[0] === 'validators' && parts[1] === 'performance') {
+    const window = Math.max(50, Math.min(5000, intParam(url.searchParams.get('window'), 500)));
+    const perf = scoreValidators({
+      validators: state.validators(),
+      blocks: blockchain.recentProducerMeta(window),
+      blockTimeMs: CHAIN.BLOCK_TIME_MS,
+    });
+    send(res, 200, perf);
+    return;
+  }
+
   if (GET && parts[0] === 'validators') {
+    const perf = scoreValidators({
+      validators: state.validators(),
+      blocks: blockchain.recentProducerMeta(500),
+      blockTimeMs: CHAIN.BLOCK_TIME_MS,
+    });
     send(res, 200, {
       maxValidators: CHAIN.MAX_VALIDATORS,
       minStake: CHAIN.MIN_VALIDATOR_STAKE,
       blockReward: blockchain.blockReward(Math.max(blockchain.height + 1, 0)),
       current: state.validators(),
       slotProducer: blockchain.expectedProducer(Date.now()),
+      performance: perf.validators,        // score/status por validador (desempenho recente)
+      performanceSummary: perf.summary,    // agregado: saudáveis, degradados, pior score
+      performanceWindow: perf.window,
     });
     return;
   }
@@ -795,6 +860,26 @@ async function handle(node, req, res) {
     let proposals = Object.values(state.proposals);
     if (status) proposals = proposals.filter((p) => p.status === status.toUpperCase());
     send(res, 200, proposals.map((p) => ({ ...p, voteCount: Object.keys(p.votes ?? {}).length })));
+    return;
+  }
+  // Conselheiro de governança: a IA REDIGE rascunhos de GOV_PROPOSE para parâmetros fora
+  // da faixa saudável (propose-only; governança decide). Vazio quando tudo está saudável.
+  if (GET && parts[0] === 'governance' && parts[1] === 'advisories' && parts.length === 2) {
+    if (eligibleCache.height !== blockchain.height) {
+      eligibleCache = { height: blockchain.height, value: state.eligibleValidatorCount() }; // varredura cacheada por altura (M2)
+    }
+    const params = {};
+    for (const k of Object.keys(CHAIN.GOVERNABLE)) params[k] = state.param(k);
+    const advisories = adviseGovernance({
+      params,
+      stats: {
+        eligibleValidators: eligibleCache.value,
+        activeValidators: state.validators().length,
+        finalityMinValidators: CHAIN.FINALITY_MIN_VALIDATORS,
+        bridge: { breakerActive: blockchain.height >= CHAIN.BRIDGE_BREAKER_HEIGHT, breakerTripsWindow: 0 },
+      },
+    });
+    send(res, 200, { advisories, count: advisories.length, at: Date.now() });
     return;
   }
   if (GET && parts[0] === 'governance' && parts.length === 1) {

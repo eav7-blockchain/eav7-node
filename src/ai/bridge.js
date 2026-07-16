@@ -93,9 +93,12 @@ export function buildOracleRegisterTx(wallet, { stake, endpoint = null, nonce, t
 
 // Entrega o resultado. Modo padrão: `output` (plaintext on-chain). Modo hash-only da
 // Fase 5: passe `resultHash` (+ `resultUri` opcional) — o output real fica off-chain.
-export function buildAiResultTx(wallet, { taskId, output = null, resultHash = null, resultUri = null, nonce, timestamp }) {
+export function buildAiResultTx(wallet, { taskId, output = null, resultHash = null, resultUri = null, attestation = null, nonce, timestamp }) {
   const data = resultHash != null
     ? { taskId, resultHash, ...(resultUri != null ? { resultUri } : {}) }
     : { taskId, output };
+  // Fase 6: atestação opcional (TEE/zk) — { attesterId, sigs:[{r,s,recId}] } sobre o
+  // digest do resultado. Presente → o resultado liquida na hora (verificado).
+  if (attestation != null) data.attestation = attestation;
   return buildTransaction(wallet, { type: 'AI_RESULT', nonce, timestamp, data });
 }

@@ -9,6 +9,7 @@ import { P2P } from './p2p.js';
 import { createApiServer } from './api.js';
 import { createEavmRpcServer } from '../eavm/rpc.js';
 import { GatewayHealth } from './gateway.js';
+import { AbuseGuard } from './guard.js';
 
 export class Eav7Node {
   constructor({
@@ -41,6 +42,8 @@ export class Eav7Node {
     this.p2p = new P2P({ node: this, selfUrl: selfUrl ?? `http://127.0.0.1:${port}`, peers, allowPrivatePeers, log });
     // Balanceador/failover do gateway público (operacional, reversível, fora do consenso).
     this.gateway = new GatewayHealth({ node: this, log });
+    // Auto-mitigação: bloqueio temporário de IPs abusivos (operacional, TTL, reversível).
+    this.guard = new AbuseGuard({ log });
     this.api = createApiServer(this);
     this.eavmEnabled = eavm;
     this.eavmPort = eavmPort ?? port + 1000;

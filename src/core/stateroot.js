@@ -56,6 +56,9 @@ function stateLeaves(state) {
   for (const [a, r] of Object.entries(state.rewardAccPerVote ?? {})) leaves.push(leaf('racc', a, r));
   for (const [a, d] of Object.entries(state.voterRewardDebt ?? {})) leaves.push(leaf('rdebt', a, d));
   for (const [id, t] of Object.entries(state.aiTasks)) leaves.push(leaf('ai', id, t));
+  // Fase 6: atestadores de IA. Só entra quando NÃO-vazio → antes do fork (registro vazio)
+  // a serialização é idêntica, preservando o stateRoot histórico (rollout coordenado).
+  for (const [id, a] of Object.entries(state.aiAttesters ?? {})) leaves.push(leaf('attest', id, a));
   leaves.push(leaf('brg', 'state', state.bridge));
   leaves.push(leaf('brg', 'relayers', state.bridgeRelayers));
   leaves.push(leaf('brg', 'committees', state.bridgeSourceCommittees ?? {}));

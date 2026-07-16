@@ -104,6 +104,7 @@ export const CHAIN = {
     FEE_EXEMPT_STAKE: { kind: 'bigint', min: 0n, max: 1_000_000n * UNIT },
     MIN_ORACLE_STAKE: { kind: 'bigint', min: 0n, max: 1_000_000n * UNIT },
     TREASURY_PCT: { kind: 'int', min: 0, max: 50 },
+    BRIDGE_BREAKER_BPS: { kind: 'int', min: 100, max: 10_000 }, // 1%..100% do pool por janela
   },
   MIN_ORACLE_STAKE: 500n * UNIT,
   FEE_EXEMPT_STAKE: 100n * UNIT, // stake >= 100 EAV7 => transações com taxa zero
@@ -148,6 +149,41 @@ export const CHAIN = {
   // abaixo disso (dev/bootstrap de 1-2 nós) não há garantia BFT e a finalidade fica
   // desligada para não travar reorgs legítimos.
   FINALITY_MIN_VALIDATORS: 3,
+
+  // Circuit breaker da ponte (auto-mitigação, guardrail de CONSENSO). A PARTIR de
+  // BRIDGE_BREAKER_HEIGHT, a soma das LIBERAÇÕES (BRIDGE_IN) por ativo numa janela
+  // deslizante de BRIDGE_BREAKER_WINDOW_BLOCKS não pode exceder BRIDGE_BREAKER_BPS
+  // (basis points) do pool travado no início da janela. Excedeu → a liberação é
+  // REJEITADA (falha fechada) até a janela abrir. Transforma um dreno total (relayer/
+  // comitê comprometido — achado C1) num vazamento lento e observável, sem confiar em
+  // nenhum ator. É DETERMINÍSTICO (altura + valores são estado de consenso → todos os
+  // nós decidem igual, sem fork). O limite é GOVERNÁVEL (validadores ajustam por
+  // GOV_PROPOSE). IMPORTANTE: NÃO entra em FORK_HEIGHTS — precisa ser altura FUTURA
+  // acordada mesmo no gênese-ativo, senão muda a serialização de `state.bridge` (que
+  // está no stateRoot) e quebraria o replay dos blocos já produzidos. Rollout
+  // COORDENADO (mesmo valor nos 3 nós antes de a cadeia cruzá-la), como C1/M1.
+  // Override por env p/ o ROLLOUT COORDENADO: define a MESMA altura futura nos 3 nós via
+  // EAV7_BRIDGE_BREAKER_HEIGHT (systemd drop-in) sem editar código. Sem env = dormente (100M).
+  BRIDGE_BREAKER_HEIGHT: Number(process.env.EAV7_BRIDGE_BREAKER_HEIGHT) || 100_000_000,
+  BRIDGE_BREAKER_WINDOW_BLOCKS: 3_600, // ~1h a 1 bloco/s
+  BRIDGE_BREAKER_BPS: 3_000, // 30% do pool por janela
+
+  // Fase 6 — resultados de IA VERIFICÁVEIS por atestação (TEE / zkML). A PARTIR de
+  // AI_TEE_HEIGHT, um AI_RESULT pode carregar uma ATESTAÇÃO: assinaturas de um conjunto
+  // de atestadores REGISTRADO por governança (medida do enclave TEE ou verificador zk)
+  // sobre o digest (taskId, resultHash, measurement). Com >= quórum de assinaturas
+  // válidas, o resultado é aceito como VERIFICADO e liquida NA HORA — sem depender da
+  // janela de desafio otimista (Fase 3) nem da reputação. Forjar exige as chaves de
+  // atestação do enclave, não confiança no oráculo. A prova/quote é gerada OFF-CHAIN pela
+  // infra do operador (enclave SGX/SEV/TDX ou prover zk); a EAV7 só VERIFICA a assinatura
+  // do atestador registrado (determinístico, reusa verifyCommitteeProof da ponte #3).
+  // IMPORTANTE: NÃO entra em FORK_HEIGHTS — altura FUTURA acordada mesmo no gênese-ativo,
+  // senão o registro `aiAttesters` mudaria a serialização do stateRoot e quebraria o
+  // replay dos blocos já produzidos. Rollout COORDENADO (mesmo valor nos 3 nós). zkML real
+  // (verificar um SNARK on-chain) é follow-up — exige verificador de pareamento (não zero-dep).
+  // Override por env p/ o ROLLOUT COORDENADO (idem breaker): EAV7_AI_TEE_HEIGHT idêntico nos 3 nós.
+  AI_TEE_HEIGHT: Number(process.env.EAV7_AI_TEE_HEIGHT) || 100_000_000,
+  MAX_AI_ATTESTER_MEMBERS: 32,
 
   // Rate limit por IP (usa CF-Connecting-IP atrás da Cloudflare).
   RATE_LIMIT_WINDOW_MS: 10_000,
