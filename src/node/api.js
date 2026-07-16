@@ -165,6 +165,29 @@ function proxyToWeb(req, res, node) {
   req.pipe(upstream);
 }
 
+// Failover de gateway: encaminha uma LEITURA (GET) ao peer mais saudável quando este nó
+// está stale. Marca x-eav7-proxied para não formar loop. Retorna true se serviu, false
+// se falhou (o chamador cai no atendimento local).
+async function proxyToPeer(req, res, target, node) {
+  try {
+    const up = await fetch(target + req.url, {
+      headers: { accept: 'application/json', 'x-eav7-proxied': '1' },
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = Buffer.from(await up.arrayBuffer());
+    res.writeHead(up.status, {
+      'content-type': up.headers.get('content-type') || 'application/json; charset=utf-8',
+      'access-control-allow-origin': '*',
+      'x-eav7-served-by': target,
+    });
+    res.end(body);
+    return true;
+  } catch (e) {
+    node.log?.(`[gateway] proxy de leitura falhou (${target}): ${e.message}`);
+    return false;
+  }
+}
+
 export function createApiServer(node) {
   return createServer((req, res) => {
     handle(node, req, res).catch((err) => {
@@ -232,6 +255,13 @@ async function handle(node, req, res) {
   if ((GET || req.method === 'HEAD') && isWebRequest(req, url.pathname)) {
     proxyToWeb(req, res, node);
     return;
+  }
+
+  // Failover de gateway (operacional): se este nó-gateway está stale, serve as LEITURAS
+  // públicas (GET, exceto /gateway) do peer mais saudável. Não afeta escrita nem consenso;
+  // x-eav7-proxied evita loop; se o peer falhar, cai no atendimento local abaixo.
+  if (GET && node.gateway?.target && !('x-eav7-proxied' in req.headers) && url.pathname !== '/gateway') {
+    if (await proxyToPeer(req, res, node.gateway.target, node)) return;
   }
 
   // ---- SPA React (web/dist) — legado (fallback quando o Next está fora) -----
@@ -374,6 +404,21 @@ async function handle(node, req, res) {
       eavm: node.eavmEnabled
         ? { chainId: CHAIN.EAVM_CHAIN_ID, rpcPort: node.eavmPort, decimals: 18, rpcUrl: node.publicRpcUrl }
         : null,
+    });
+    return;
+  }
+
+  // Saúde/roteamento do gateway (balanceador + failover, operacional).
+  if (GET && parts[0] === 'gateway' && parts.length === 1) {
+    const g = node.gateway;
+    send(res, 200, {
+      failover: process.env.EAV7_GATEWAY_FAILOVER === '1',
+      servingLocal: !g?.target,
+      target: g?.target ?? null, // peer de onde as leituras estão sendo servidas (null = local)
+      self: g?.snapshot?.self ?? blockchain.height,
+      lag: g?.lag ?? null,
+      peers: g?.snapshot?.peers ?? [],
+      at: g?.snapshot?.at ?? null,
     });
     return;
   }

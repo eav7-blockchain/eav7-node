@@ -8,6 +8,7 @@ import { verifyTransaction } from '../core/transaction.js';
 import { P2P } from './p2p.js';
 import { createApiServer } from './api.js';
 import { createEavmRpcServer } from '../eavm/rpc.js';
+import { GatewayHealth } from './gateway.js';
 
 export class Eav7Node {
   constructor({
@@ -38,6 +39,8 @@ export class Eav7Node {
     this.genesisFile = genesisFile;
     this.securityAlerts = [];
     this.p2p = new P2P({ node: this, selfUrl: selfUrl ?? `http://127.0.0.1:${port}`, peers, allowPrivatePeers, log });
+    // Balanceador/failover do gateway público (operacional, reversível, fora do consenso).
+    this.gateway = new GatewayHealth({ node: this, log });
     this.api = createApiServer(this);
     this.eavmEnabled = eavm;
     this.eavmPort = eavmPort ?? port + 1000;
@@ -221,6 +224,7 @@ export class Eav7Node {
       });
     }
     await this.p2p.start();
+    this.gateway.start();
     if (this.validatorWallet) {
       this.productionTimer = setInterval(() => this.#produce(), 200);
     }
@@ -237,6 +241,7 @@ export class Eav7Node {
   stop() {
     if (this.productionTimer) clearInterval(this.productionTimer);
     this.productionTimer = null;
+    this.gateway.stop();
     this.p2p.stop();
     this.api.close();
     this.eavmServer?.close();
