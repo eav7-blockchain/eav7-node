@@ -1,0 +1,43 @@
+{
+  "name": "eav7-node",
+  "version": "1.0.0",
+  "description": "EAV7 — DPoS Layer-1 blockchain node with the EAVM (EVM-compatible VM), post-quantum hybrid signatures, a native AI layer and a trustless cross-chain bridge. 100% Node.js, zero dependencies.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "eav7": "bin/eav7.js"
+  },
+  "scripts": {
+    "start": "node bin/eav7.js node start",
+    "mine": "node bin/eav7.js mine",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eav7-blockchain/eav7-node.git"
+  },
+  "homepage": "https://eavscan.com",
+  "bugs": {
+    "url": "https://github.com/eav7-blockchain/eav7-node/issues"
+  },
+  "keywords": [
+    "blockchain",
+    "dpos",
+    "eav7",
+    "eavm",
+    "evm",
+    "post-quantum",
+    "ml-dsa",
+    "layer-1",
+    "cryptocurrency"
+  ],
+  "author": "EAV7 Blockchain",
+  "files": [
+    "src",
+    "bin",
+    "public"
+  ]
+}

@@ -1,0 +1,22 @@
+# dependencies (there are none — but never commit if added)
+node_modules/
+
+# chain data & wallets — NEVER commit
+data/
+backups/
+*-wallet.json
+wallet-*.json
+*.wallet.json
+
+# secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+eav7.env
+
+# os / editor
+.DS_Store
+*.log
